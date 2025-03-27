@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "weather": {
+      "command": "python",
+      "args": [
+        "D:/VS_WorkSpace/weather-mcp/weather-mcp-server/weather-mcp-server.py"
+      ],
+      "env": {
+        "AMAP_API_KEY": "<你的高德地图API密钥>"
+      }
+    }
+  }
+} 
