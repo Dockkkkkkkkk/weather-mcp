@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
+from functools import wraps
 
 # 加载环境变量
 load_dotenv()
@@ -139,6 +140,18 @@ class LangChainMCPAPIExample:
         prompt = ChatPromptTemplate.from_messages([
             ("system", """你是一个智能助手，能够利用各种API工具帮助用户解决问题。
             你可以处理数据，发送请求，管理字典数据和处理API文档等任务。
+            
+            在使用工具时，请注意：
+            1. 确保严格按照工具要求的格式提供参数
+            2. 工具返回的内容可能是复杂的JSON，需要你解析和理解
+            3. 如果工具调用失败，请分析错误信息，修正参数后重试
+            4. 返回给用户的内容应当简洁易懂，不要返回原始的JSON
+            
+            遇到错误时，请进行如下处理：
+            - 如果参数错误，检查参数类型和必填项，然后重试
+            - 如果API端点返回错误，解释错误原因并提供替代解决方案
+            - 如果你不确定如何使用某个工具，可以用简单的示例尝试，或者选择其他更熟悉的工具
+            
             请仔细分析用户的需求，选择最合适的工具来完成任务，并将结果以清晰易懂的方式呈现给用户。
             在处理敏感信息时，请注意保密性。"""),
             MessagesPlaceholder(variable_name="chat_history"),
@@ -164,6 +177,179 @@ class LangChainMCPAPIExample:
             return self.agent_executor
         
         try:
+            # 添加一个安全的工具包装器类，适应各种工具类型
+            class SafeToolWrapper:
+                """
+                安全的工具包装器，处理各种工具类型和异常情况
+                """
+                
+                @staticmethod
+                def wrap_tools(tools):
+                    """包装工具列表，返回包装后的工具列表"""
+                    wrapped_tools = []
+                    
+                    for tool in tools:
+                        try:
+                            # 确定工具类型和调用方法
+                            tool_name = getattr(tool, 'name', str(tool))
+                            tool_type = type(tool).__name__
+                            logger.info(f"包装工具: {tool_name}, 类型: {tool_type}")
+                            
+                            # 根据工具类型选择适当的包装方法
+                            wrapped_tool = SafeToolWrapper._wrap_tool(tool)
+                            wrapped_tools.append(wrapped_tool)
+                            logger.info(f"工具 {tool_name} 包装成功")
+                        except Exception as e:
+                            logger.error(f"包装工具 {getattr(tool, 'name', str(tool))} 失败: {str(e)}")
+                            # 如果包装失败，添加原始工具
+                            wrapped_tools.append(tool)
+                    
+                    return wrapped_tools
+                
+                @staticmethod
+                def _wrap_tool(tool):
+                    """包装单个工具"""
+                    # 为各种可能的执行方法添加异常处理和响应处理
+                    
+                    # 包装 _run 方法
+                    if hasattr(tool, "_run"):
+                        original_run = tool._run
+                        
+                        @wraps(original_run)
+                        def safe_run(*args, **kwargs):
+                            try:
+                                result = original_run(*args, **kwargs)
+                                # 对结果进行预处理，确保格式正确
+                                return SafeToolWrapper._process_response(result, tool.name)
+                            except Exception as e:
+                                logger.error(f"工具 {tool.name} 执行出错: {str(e)}")
+                                error_msg = f"工具执行错误 ({tool.name}): {str(e)}"
+                                # 返回元组格式
+                                return (error_msg, str(e))
+                        
+                        tool._run = safe_run
+                    
+                    # 包装 _arun 方法
+                    if hasattr(tool, "_arun"):
+                        original_arun = tool._arun
+                        
+                        @wraps(original_arun)
+                        async def safe_arun(*args, **kwargs):
+                            try:
+                                result = await original_arun(*args, **kwargs)
+                                # 对结果进行预处理，确保格式正确
+                                return SafeToolWrapper._process_response(result, tool.name)
+                            except Exception as e:
+                                logger.error(f"工具 {tool.name} 异步执行出错: {str(e)}")
+                                error_msg = f"工具异步执行错误 ({tool.name}): {str(e)}"
+                                # 返回元组格式
+                                return (error_msg, str(e))
+                        
+                        tool._arun = safe_arun
+                    
+                    return tool
+                
+                @staticmethod
+                def _process_response(response, tool_name):
+                    """处理工具响应，确保格式正确且易于解析"""
+                    try:
+                        # 如果响应已经是元组格式，检查是否符合(content, artifact)格式
+                        if isinstance(response, tuple) and len(response) == 2:
+                            # 已经是正确格式，直接返回
+                            return response
+                            
+                        processed_content = None
+                        original_response = response  # 保存原始响应用于artifact
+                        
+                        # 如果是JSON字符串，尝试解析再重新序列化，以确保格式一致
+                        if isinstance(response, str):
+                            try:
+                                if response.startswith('[') and response.endswith(']'):
+                                    # 处理JSON数组
+                                    json_array = json.loads(response)
+                                    # 对数组中每个对象进行处理，特别处理中文和特殊字符
+                                    simplified_results = []
+                                    for item in json_array:
+                                        if isinstance(item, str):
+                                            try:
+                                                # 尝试解析嵌套的JSON字符串
+                                                json_item = json.loads(item)
+                                                simplified_results.append(json_item)
+                                            except:
+                                                simplified_results.append(item)
+                                        else:
+                                            simplified_results.append(item)
+                                    
+                                    # 将复杂对象转换为简洁格式
+                                    simplified_text = ""
+                                    for item in simplified_results:
+                                        if isinstance(item, dict) and "api_name" in item and "description" in item:
+                                            desc = item.get("description", "")
+                                            # 移除不必要的转义字符
+                                            if isinstance(desc, str):
+                                                desc = desc.encode().decode('unicode_escape')
+                                            simplified_text += f"- {item['api_name']}: {desc}\n"
+                                        else:
+                                            simplified_text += f"- {str(item)}\n"
+                                    
+                                    processed_content = simplified_text
+                                elif response.startswith('{') and response.endswith('}'):
+                                    # 处理单个JSON对象
+                                    json_obj = json.loads(response)
+                                    
+                                    # 如果是API文档，进行特殊处理
+                                    if "api_name" in json_obj and "description" in json_obj and "doc" in json_obj:
+                                        api_name = json_obj.get("api_name", "")
+                                        desc = json_obj.get("description", "")
+                                        doc = json_obj.get("doc", "")
+                                        
+                                        # 移除不必要的转义字符
+                                        if isinstance(desc, str):
+                                            desc = desc.encode().decode('unicode_escape')
+                                        if isinstance(doc, str):
+                                            doc = doc.encode().decode('unicode_escape')
+                                        
+                                        processed_content = f"API名称: {api_name}\n描述: {desc}\n\n文档:\n{doc}"
+                                    else:
+                                        # 将JSON对象转为字符串，确保格式正确
+                                        processed_content = json.dumps(json_obj, ensure_ascii=False, indent=2)
+                            except Exception as e:
+                                logger.warning(f"处理工具 {tool_name} 的JSON响应时出错: {str(e)}")
+                                # 如果JSON解析失败，使用原始响应
+                                processed_content = response
+                        
+                        # 对于其他类型的响应，转换为字符串
+                        if processed_content is None:
+                            if not isinstance(response, str):
+                                response_str = str(response)
+                                # 如果是复杂对象的字符串表示，尝试美化
+                                if response_str.startswith('{') or response_str.startswith('['):
+                                    try:
+                                        processed_content = json.dumps(response, ensure_ascii=False, indent=2)
+                                    except:
+                                        processed_content = response_str
+                                else:
+                                    processed_content = response_str
+                            else:
+                                processed_content = response
+                        
+                        # 返回符合response_format='content_and_artifact'格式的元组
+                        return (processed_content, original_response)
+                    except Exception as e:
+                        logger.error(f"处理工具 {tool_name} 响应时发生未知错误: {str(e)}")
+                        error_msg = f"处理响应出错，原始响应: {str(response)[:100]}..."
+                        # 即使出错也返回元组格式
+                        return (error_msg, response)
+            
+            # 使用新的包装器包装工具
+            try:
+                logger.info(f"开始包装 {len(self.tools)} 个工具...")
+                self.tools = SafeToolWrapper.wrap_tools(self.tools)
+                logger.info("所有工具包装完成")
+            except Exception as e:
+                logger.error(f"工具包装过程中出错: {str(e)}")
+                logger.error(f"将继续使用原始工具")
+            
             # 适配DashScope API的函数格式
             # 将工具元数据转换为兼容的格式
             tools_for_binding = []
@@ -201,7 +387,7 @@ class LangChainMCPAPIExample:
                         })
                     }
                     
-                    # 验证并修正parameters格式，确保符合OpenAPI规范
+                    # 深度验证并修正parameters格式，确保符合OpenAPI规范
                     if not isinstance(formatted_tool["parameters"], dict):
                         logger.warning(f"工具 {formatted_tool['name']} 的parameters不是字典类型，设置为默认值")
                         formatted_tool["parameters"] = {
@@ -217,6 +403,16 @@ class LangChainMCPAPIExample:
                     if "type" not in formatted_tool["parameters"]:
                         logger.warning(f"工具 {formatted_tool['name']} 的parameters缺少type字段，设置为object")
                         formatted_tool["parameters"]["type"] = "object"
+                    
+                    # 确保properties是一个对象而不是数组或其他类型
+                    if not isinstance(formatted_tool["parameters"]["properties"], dict):
+                        logger.warning(f"工具 {formatted_tool['name']} 的properties不是字典类型，设置为空字典")
+                        formatted_tool["parameters"]["properties"] = {}
+                    
+                    # 确保required是一个数组
+                    if "required" in formatted_tool["parameters"] and not isinstance(formatted_tool["parameters"]["required"], list):
+                        logger.warning(f"工具 {formatted_tool['name']} 的required不是数组类型，设置为空数组")
+                        formatted_tool["parameters"]["required"] = []
                     
                     tools_for_binding.append(formatted_tool)
                     logger.info(f"工具 {formatted_tool['name']} 成功格式化")
@@ -245,14 +441,44 @@ class LangChainMCPAPIExample:
             )
             
             # 创建Agent执行器
-            self.agent_executor = AgentExecutor.from_agent_and_tools(
-                agent=agent,
-                tools=self.tools,
-                verbose=True,
-            )
-            
-            logger.info("已成功设置Agent")
-            return self.agent_executor
+            try:
+                self.agent_executor = AgentExecutor.from_agent_and_tools(
+                    agent=agent,
+                    tools=self.tools,
+                    verbose=True,
+                    handle_parsing_errors=True,  # 启用解析错误处理，允许将错误传回模型
+                    max_iterations=5,  # 允许最多重试5次
+                    early_stopping_method="force",  # 使用force替代generate作为早期停止方法
+                    return_intermediate_steps=True,  # 返回中间步骤以便分析
+                )
+                
+                logger.info("已成功设置Agent")
+                return self.agent_executor
+            except Exception as e:
+                logger.error(f"创建AgentExecutor时出错: {str(e)}")
+                logger.error(f"错误详情: {repr(e)}")
+                
+                # 尝试使用更简单的配置创建Agent
+                logger.info("尝试使用简化配置创建Agent...")
+                
+                try:
+                    from langchain.agents import AgentType, initialize_agent
+                    
+                    self.agent_executor = initialize_agent(
+                        tools=self.tools,
+                        llm=llm,
+                        agent=AgentType.OPENAI_FUNCTIONS,
+                        verbose=True,
+                        handle_parsing_errors=True,
+                        max_iterations=5,
+                        early_stopping_method="force"  # 使用force替代generate
+                    )
+                    
+                    logger.info("已使用简化配置成功设置Agent")
+                    return self.agent_executor
+                except Exception as fallback_error:
+                    logger.error(f"使用简化配置创建Agent时也失败: {str(fallback_error)}")
+                    raise e  # 重新抛出原始错误
             
         except Exception as e:
             logger.error(f"设置Agent时出错: {str(e)}")
@@ -282,14 +508,58 @@ class LangChainMCPAPIExample:
             result = await self.agent_executor.ainvoke({"input": query})
             response = result["output"]
             
+            # 分析中间步骤，检查是否有工具调用错误
+            if "intermediate_steps" in result:
+                has_errors = False
+                error_messages = []
+                
+                for step in result["intermediate_steps"]:
+                    # 检查工具调用结果是否包含错误信息
+                    if len(step) >= 2:
+                        tool_result = step[1]
+                        
+                        # 如果工具结果是元组格式 (content, artifact)，提取content部分
+                        if isinstance(tool_result, tuple) and len(tool_result) == 2:
+                            tool_content = tool_result[0]
+                        else:
+                            tool_content = tool_result
+                            
+                        # 检测不同类型的错误信息
+                        if isinstance(tool_content, str) and any(err in tool_content.lower() for err in ["错误", "error", "exception", "failed", "失败"]):
+                            has_errors = True
+                            error_message = f"工具 '{step[0].tool}' 执行出错: {tool_content}"
+                            error_messages.append(error_message)
+                            logger.warning(error_message)
+                
+                # 如果存在错误，添加到响应中
+                if has_errors:
+                    error_summary = "\n".join(error_messages)
+                    logger.error(f"工具调用过程中发生错误: \n{error_summary}")
+                    
+                    # 将错误信息附加到响应中，使用明显的格式
+                    if "错误" not in response and "error" not in response.lower():
+                        response += f"\n\n⚠️ 系统提示: 执行过程中遇到以下问题:\n{error_summary}"
+            
             # 记录AI回复
             self.memory.append(AIMessage(content=response))
             
+            logger.info(f"查询处理完成，结果: {response[:100]}...")
             return response
         except Exception as e:
             error_msg = f"处理查询时出错: {str(e)}"
             logger.error(error_msg)
-            return error_msg
+            
+            # 记录详细的错误信息
+            logger.error(f"错误详情: {repr(e)}")
+            if hasattr(e, '__dict__'):
+                logger.error(f"错误属性: {e.__dict__}")
+                
+            # 将错误信息添加到对话记忆中，让AI理解发生了什么
+            error_content = f"抱歉，我在处理您的请求时遇到了技术问题。错误信息: {str(e)}"
+            self.memory.append(AIMessage(content=error_content))
+            
+            # 返回友好的错误信息给用户
+            return f"抱歉，处理您的请求时出现了问题: {str(e)}\n请尝试重新表述您的问题，或者尝试其他操作。"
     
     async def direct_call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """
@@ -314,13 +584,35 @@ class LangChainMCPAPIExample:
         logger.info(f"直接调用工具: {tool_name}, 参数: {arguments}")
         
         try:
-            # 调用工具
-            result = await tool.ainvoke(arguments)
+            # 根据工具类型选择合适的调用方式
+            result = None
+            if hasattr(tool, 'ainvoke'):
+                # 优先使用ainvoke方法
+                result = await tool.ainvoke(arguments)
+            elif hasattr(tool, '_arun'):
+                # 使用_arun方法
+                result = await tool._arun(**arguments)
+            elif hasattr(tool, '_run'):
+                # 尝试调用同步_run方法
+                result = tool._run(**arguments)
+            else:
+                # 尝试使用__call__方法
+                result = await tool.__call__(**arguments)
+            
             logger.info(f"工具 {tool_name} 执行成功")
+            
+            # 处理元组格式的结果
+            if isinstance(result, tuple) and len(result) == 2:
+                # 只返回内容部分，忽略原始响应
+                return result[0]
+            
             return result
         except Exception as e:
             error_msg = f"调用工具 {tool_name} 时出错: {str(e)}"
             logger.error(error_msg)
+            logger.error(f"错误详情: {repr(e)}")
+            if hasattr(e, '__dict__'):
+                logger.error(f"错误属性: {e.__dict__}")
             raise
 
 
