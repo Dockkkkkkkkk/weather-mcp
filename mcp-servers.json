@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "common-api-server": {
+      "transport": "sse",
+      "url": "http://localhost:8080/sse",
+      "reconnect": {
+        "enabled": true,
+        "maxAttempts": 5,
+        "delayMs": 2000
+      }
+    }
+  }
+} 

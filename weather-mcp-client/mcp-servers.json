@@ -8,6 +8,9 @@
       "env": {
         "AMAP_API_KEY": "<你的高德地图API密钥>"
       }
+    },
+    "common-api-server": {
+      "url": "http://localhost:8080/sse"
     }
   }
 } 

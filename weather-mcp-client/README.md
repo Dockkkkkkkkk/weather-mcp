@@ -246,4 +246,101 @@ code $env:AppData\Claude\claude_desktop_config.json
 ## 数据来源
 
 * 天气数据：高德地图天气API
-* 智能对话：阿里云通义千问API (通过OpenAI兼容接口) 
+* 智能对话：阿里云通义千问API (通过OpenAI兼容接口)
+
+# 天气MCP客户端
+
+这个项目包含了两种不同的MCP（Model Context Protocol）客户端实现方式，用于连接MCP服务器并访问其工具。
+
+## 项目结构
+
+- `langchain_client.py` - 基于原始MCP库的客户端实现
+- `langchain_mcp_example.py` - 使用langchain-mcp-adapters的简化客户端实现
+- `requirements.txt` - 项目依赖项
+- `mcp-servers.json` - MCP服务器配置文件
+
+## 依赖项安装
+
+```bash
+pip install -r requirements.txt
+```
+
+## 服务器配置
+
+编辑`mcp-servers.json`文件，配置你的MCP服务器:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "python",
+      "args": ["../weather.py"],
+      "env": {
+        "WEATHER_API_KEY": "your_api_key"
+      }
+    },
+    "math": {
+      "command": "python",
+      "args": ["../math_server.py"]
+    }
+  }
+}
+```
+
+## 使用方法
+
+### 1. 设置环境变量
+
+大模型API密钥可以通过环境变量设置:
+
+```bash
+# Windows
+$env:OPENAI_API_KEY="your_api_key"
+
+# Linux/Mac
+export OPENAI_API_KEY="your_api_key"
+```
+
+或者创建`.env`文件:
+
+```
+OPENAI_API_KEY=your_api_key
+```
+
+### 2. 使用原始客户端
+
+```bash
+python langchain_client.py
+```
+
+原始客户端提供以下功能:
+- 支持多个MCP服务器连接
+- 命令行工具调用格式: `/工具名 参数`
+- 自然语言查询处理
+- 多轮对话支持
+
+### 3. 使用langchain-mcp-adapters客户端
+
+```bash
+python langchain_mcp_example.py
+```
+
+这个简化客户端使用langchain-mcp-adapters库，提供以下功能:
+- 更简洁的代码
+- 原生LangChain集成
+- 自动工具加载
+- ReAct代理模式
+
+## 两种实现的对比
+
+| 特性 | 原始客户端 | langchain-mcp-adapters客户端 |
+|-----|----------|---------------------------|
+| 代码复杂度 | 较高 | 较低 |
+| 自定义能力 | 强 | 中等 |
+| 工具调用方式 | 命令行格式和自然语言 | 主要是自然语言 |
+| 异常处理 | 详细 | 基本 |
+| 适合场景 | 需要深度定制的项目 | 快速原型开发 |
+
+## 关于MCP
+
+Model Context Protocol (MCP) 是由Anthropic开发的开源协议，用于连接大型语言模型与外部工具和数据源。它提供了标准化的接口，使LLM能够安全地访问和使用各种外部功能。 
